@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GiraCota · Teste do PDF</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#08302F">
+<link rel="icon" href="/icons/icon-192.png">
+<style>
+  :root { --petroleo:#08302F; --dourado:#D4AF37; --fundo:#f1f5f4; --ok:#1b7f4b; --aviso:#b26a00; --erro:#b3261e; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; background:var(--fundo); color:#1c2b2a; }
+  header { background:var(--petroleo); color:#fff; padding:18px 16px; }
+  header h1 { margin:0; font-size:22px; }
+  header p { margin:4px 0 0; opacity:.8; font-size:14px; }
+  main { padding:14px; max-width:720px; margin:0 auto; }
+  .cartao { background:#fff; border-radius:14px; padding:14px 16px; margin-bottom:12px; box-shadow:0 1px 3px rgba(0,0,0,.08); }
+  .cartao h2 { margin:0 0 6px; font-size:16px; }
+  .peq { font-size:13px; color:#52615f; }
+  button { font:inherit; border:2px solid var(--petroleo); background:#fff; color:var(--petroleo); border-radius:12px; padding:12px 16px; width:100%; font-weight:600; }
+  button.ouro { background:var(--dourado); border-color:var(--dourado); }
+  .faixa { border-radius:12px; padding:12px 14px; margin-bottom:12px; font-size:15px; }
+  .faixa.ok { background:#e3f4ea; color:#0f5132; }
+  .faixa.aviso { background:#fff3d6; color:#6b4300; }
+  .faixa.erro { background:#fde4e2; color:#8a1c14; }
+  .item { border-left:5px solid var(--ok); }
+  .item.aviso { border-left-color:var(--aviso); }
+  .item.erro { border-left-color:var(--erro); }
+  .nome { font-weight:700; font-size:15px; }
+  .linha { display:flex; justify-content:space-between; gap:8px; font-size:14px; margin-top:4px; }
+  .chip { display:inline-block; font-size:12px; font-weight:700; border-radius:20px; padding:2px 9px; margin-right:6px; }
+  .chip.un { background:#e3f4ea; color:#0f5132; }
+  .chip.cx { background:#e6eefc; color:#173d7a; }
+  .chip.bad { background:#fde4e2; color:#8a1c14; }
+  code { font-size:13px; background:#eef2f1; padding:1px 5px; border-radius:5px; word-break:break-all; }
+  .av { font-size:13px; color:var(--aviso); margin-top:6px; }
+  details pre { white-space:pre-wrap; word-break:break-word; font-size:12px; background:#0b1f1e; color:#cfe9e5; padding:12px; border-radius:10px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>GiraCota</h1>
+  <p>Protótipo: receber o PDF pelo menu Compartilhar</p>
+</header>
+
+<main>
+  <div id="estado" class="faixa aviso">Aguardando um PDF…</div>
+
+  <section class="cartao" id="cartaoInstalar">
+    <h2>1. Instalar no celular</h2>
+    <p class="peq" id="textoInstalar">Para aparecer no menu Compartilhar, o GiraCota precisa estar instalado (Chrome → ⋮ → Instalar app).</p>
+    <button id="btnInstalar" class="ouro" hidden>Instalar o GiraCota</button>
+  </section>
+
+  <section class="cartao">
+    <h2>2. Mandar o PDF</h2>
+    <p class="peq">Normal: no Will Força de Vendas (ou qualquer app), gere o PDF, toque em <b>Compartilhar</b> e escolha <b>GiraCota</b>. Ele abre aqui sozinho.</p>
+    <button id="btnEscolher">Ou escolher o PDF manualmente</button>
+    <input type="file" id="arq" accept="application/pdf,.pdf" hidden>
+  </section>
+
+  <section id="resultado"></section>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="/parser.js"></script>
+<script>
+(function () {
+  'use strict';
+  const $ = (s) => document.querySelector(s);
+  const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+  const brl = (n) => n.toLocaleString('pt-BR', { style:'currency', currency:'BRL' });
+
+  pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(console.warn);
+
+  // ----- instalação -----
+  const instalado = matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+  let promptInstalar = null;
+  if (instalado) {
+    $('#textoInstalar').textContent = 'GiraCota instalado ✔ — já pode receber PDF pelo menu Compartilhar.';
+  }
+  addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault(); promptInstalar = e;
+    if (!instalado) $('#btnInstalar').hidden = false;
+  });
+  $('#btnInstalar').addEventListener('click', async () => {
+    if (!promptInstalar) return;
+    promptInstalar.prompt();
+    await promptInstalar.userChoice;
+    promptInstalar = null; $('#btnInstalar').hidden = true;
+  });
+
+  // ----- estado -----
+  function estado(tipo, texto) { const e = $('#estado'); e.className = 'faixa ' + tipo; e.textContent = texto; }
+
+  // ----- arquivo recebido pelo Compartilhar -----
+  async function arquivoCompartilhado() {
+    if (!('caches' in window)) return null;
+    const cache = await caches.open('giracota-compartilhado-v1');
+    const r = await cache.match('/arquivo-compartilhado');
+    if (!r) return null;
+    const blob = await r.blob();
+    const nome = decodeURIComponent(r.headers.get('X-Nome') || 'pedido.pdf');
+    await cache.delete('/arquivo-compartilhado');
+    return new File([blob], nome, { type: 'application/pdf' });
+  }
+
+  // ----- leitura -----
+  async function processar(arquivo, origem) {
+    $('#resultado').innerHTML = '';
+    estado('aviso', 'Lendo ' + arquivo.name + '…');
+    try {
+      const pdf = await pdfjsLib.getDocument({ data: await arquivo.arrayBuffer() }).promise;
+      let linhas = [];
+      for (let p = 1; p <= pdf.numPages; p++) {
+        const pg = await pdf.getPage(p);
+        const tc = await pg.getTextContent();
+        linhas = linhas.concat(GiraParser.linhasDePdfJs(tc.items));
+      }
+      if (!linhas.join('').trim()) {
+        estado('erro', 'Este PDF não tem texto (parece foto/escaneado). Precisa ser o PDF gerado pelo app do pedido.');
+        return;
+      }
+      const r = GiraParser.analisar(linhas);
+      if (!r.itens.length) {
+        estado('erro', 'Li o PDF, mas não achei linhas de produto (quantidade + preço). Layout diferente?');
+        $('#resultado').innerHTML = '<details class="cartao"><summary>Texto lido do PDF</summary><pre>' + esc(linhas.join('\n')) + '</pre></details>';
+        return;
+      }
+      desenhar(r, arquivo, origem);
+    } catch (err) {
+      estado('erro', 'Não consegui abrir este PDF: ' + (err && err.message ? err.message : err));
+    }
+  }
+
+  function desenhar(r, arquivo, origem) {
+    const problemas = r.itens.filter((i) => i.avisos.length).length;
+    estado(r.confereGeral === false ? 'erro' : 'ok',
+      (origem === 'compartilhar' ? 'Recebido pelo Compartilhar ✔ — ' : 'Arquivo escolhido — ') + arquivo.name);
+
+    let h = '<div class="cartao"><h2>Resumo</h2>' +
+      '<div class="linha"><span>Linhas lidas</span><b>' + r.itens.length + '</b></div>' +
+      '<div class="linha"><span>Quantidade total</span><b>' + r.somaQtd + '</b></div>' +
+      '<div class="linha"><span>Valor somado</span><b>' + brl(r.somaTotal) + '</b></div>' +
+      (r.totalPdf ? '<div class="linha"><span>Total impresso no PDF</span><b>' + brl(r.totalPdf.valor) + (r.confereGeral ? ' ✔ confere' : ' ✖ não confere') + '</b></div>' : '') +
+      '<div class="linha"><span>Linhas com aviso</span><b>' + problemas + '</b></div>' +
+      r.avisosGerais.map((a) => '<div class="av">⚠ ' + esc(a) + '</div>').join('') + '</div>';
+
+    r.itens.forEach((i) => {
+      const classe = i.tipoCodigo === 'invalido' || i.tipoCodigo === 'sem-codigo' ? 'erro' : (i.avisos.length ? 'aviso' : '');
+      const chip = i.tipoCodigo === 'unidade' ? '<span class="chip un">UNIDADE</span>'
+                 : i.tipoCodigo === 'caixa' ? '<span class="chip cx">CAIXA (DUN-14, indicador ' + esc(i.indicadorEmbalagem) + ')</span>'
+                 : '<span class="chip bad">' + esc(i.tipoCodigo.toUpperCase()) + '</span>';
+      h += '<div class="cartao item ' + classe + '">' +
+        '<div class="nome">' + esc(i.nome) + '</div>' +
+        '<div class="linha"><span>' + i.qtd + ' × ' + brl(i.precoUn) + '</span><b>' + brl(i.total) + '</b></div>' +
+        '<div class="linha"><span>' + chip + 'lido: <code>' + esc(i.codigoLido || '—') + '</code></span></div>' +
+        '<div class="linha"><span>Código de unidade p/ o sistema: <code>' + esc(i.eanUnidade || 'faltando') + '</code>' +
+          (i.origemEan === 'derivado do DUN-14' ? ' <i>(calculado)</i>' : '') + '</span></div>' +
+        i.avisos.map((a) => '<div class="av">⚠ ' + esc(a) + '</div>').join('') + '</div>';
+    });
+
+    h += '<details class="cartao"><summary>O que seria enviado ao GiraCota (JSON)</summary><pre>' +
+         esc(JSON.stringify(r.itens.map((i) => ({ nome:i.nome, qtd:i.qtd, preco_un:i.precoUn, total:i.total,
+           codigo_barras_unidade: i.tipoCodigo === 'unidade' ? i.codigoLido : (i.eanUnidade || null),
+           codigo_barras_caixa: i.tipoCodigo === 'caixa' ? i.codigoLido : null,
+           observacao: i.avisos.join(' ') || null })), null, 2)) + '</pre></details>';
+    $('#resultado').innerHTML = h;
+  }
+
+  // ----- entradas -----
+  $('#btnEscolher').addEventListener('click', () => $('#arq').click());
+  $('#arq').addEventListener('change', (e) => { const f = e.target.files[0]; if (f) processar(f, 'manual'); });
+
+  (async function iniciar() {
+    const q = new URLSearchParams(location.search).get('compartilhado');
+    if (q === 'erro') { estado('erro', 'O Android entregou o compartilhamento, mas o arquivo não chegou. Tente de novo.'); return; }
+    if (q === '1') {
+      history.replaceState(null, '', '/');
+      const f = await arquivoCompartilhado();
+      if (f) processar(f, 'compartilhar');
+      else estado('erro', 'Não encontrei o arquivo compartilhado. Tente de novo.');
+    }
+  })();
+})();
+</script>
+</body>
+</html>
